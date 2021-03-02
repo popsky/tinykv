@@ -22,7 +22,10 @@ func GetCF(db *badger.DB, cf string, key []byte) (val []byte, err error) {
 func GetCFFromTxn(txn *badger.Txn, cf string, key []byte) (val []byte, err error) {
 	item, err := txn.Get(KeyWithCF(cf, key))
 	if err != nil {
-		return nil, err
+		if err != badger.ErrKeyNotFound {
+			return nil, err
+		}
+		return nil, nil
 	}
 	val, err = item.ValueCopy(val)
 	return
