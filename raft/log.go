@@ -102,7 +102,7 @@ func (l *RaftLog) getEntries(first, last uint64) ([]pb.Entry, error) {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	if len(l.entries) == 0 || l.stabled >= l.LastIndex() {
-		return nil
+		return []pb.Entry{}
 	}
 	return l.entries[l.offset(l.stabled+1):]
 }
@@ -139,6 +139,9 @@ func (l *RaftLog) Append(entries []pb.Entry) {
 			}
 		}
 		l.entries = append(l.entries[:l.offset(e.Index)], entries[i:]...)
+		if e.Index <= l.stabled {
+			l.stabled = e.Index - 1
+		}
 	}
 	return
 }

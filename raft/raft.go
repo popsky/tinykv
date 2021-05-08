@@ -211,7 +211,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
-	r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgHeartbeat, To: to, From: r.id, Term: r.Term, Commit: r.RaftLog.committed})
+	pre_idx := r.Prs[to].Next - 1
+	pre_term, err := r.RaftLog.Term(pre_idx)
+	if err != nil {
+		return
+	}
+	r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgHeartbeat, To: to, From: r.id, Term: r.Term, LogTerm: pre_term, Index: pre_idx, Commit: r.RaftLog.committed})
 }
 
 func (r *Raft) sendRequestVote(to uint64) {
@@ -263,7 +268,6 @@ func (r *Raft) becomeCandidate() {
 			r.votes[id] = false
 		}
 	}
-	r.poll()
 }
 
 func (r *Raft) poll() {
@@ -291,7 +295,9 @@ func (r *Raft) becomeLeader() {
 		prs.Match = 0
 		prs.Next = r.RaftLog.LastIndex() + 1
 	}
-	r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}})
+	r.RaftLog.Append([]pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}})
+
+	// r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -307,6 +313,7 @@ func (r *Raft) Step(m pb.Message) error {
 					r.sendRequestVote(id)
 				}
 			}
+			r.poll()
 		}
 	case pb.MessageType_MsgBeat:
 		if r.State == StateLeader {
@@ -334,6 +341,7 @@ func (r *Raft) Step(m pb.Message) error {
 				r.sendAppend(to)
 			}
 		}
+		r.maybeCommit()
 	case pb.MessageType_MsgAppend:
 		if m.Term > r.Term || (r.State == StateCandidate && m.Term == r.Term) {
 			r.becomeFollower(m.Term, m.From)
@@ -350,7 +358,8 @@ func (r *Raft) Step(m pb.Message) error {
 			if len(m.Entries) > 0 {
 				entries := make([]pb.Entry, 0, len(m.Entries))
 				for _, e := range m.Entries {
-					entries = append(entries, *e)
+					ee := e
+					entries = append(entries, *ee)
 				}
 				r.RaftLog.Append(entries)
 				rep.Index = entries[len(entries)-1].Index
@@ -414,14 +423,22 @@ func (r *Raft) Step(m pb.Message) error {
 			To:      m.From,
 			From:    r.id,
 			Term:    r.Term,
+			Commit:  r.RaftLog.committed,
 		}
 		if m.Term == r.Term {
 			r.electionElapsed = 0
+		}
+		term, err := r.RaftLog.Term(m.Index)
+		if err != nil && term == m.Term && m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
+			r.RaftLog.committed = m.Commit
 		}
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgHeartbeatResponse:
 		if m.Term > r.Term {
 			r.becomeFollower(m.Term, m.From)
+		}
+		if r.State == StateLeader && m.Commit < r.RaftLog.committed {
+			r.sendHeartbeat(m.From)
 		}
 	case pb.MessageType_MsgTransferLeader:
 	case pb.MessageType_MsgTimeoutNow:
@@ -438,7 +455,7 @@ func (r *Raft) Step(m pb.Message) error {
 func (r *Raft) maybeCommit() {
 	majority := len(r.Prs)/2 + 1
 	i := r.RaftLog.LastIndex()
-	for term, err := r.RaftLog.Term(i); i > r.RaftLog.committed && err != nil && term == r.Term; i-- {
+	for term, err := r.RaftLog.Term(i); i > r.RaftLog.committed && err == nil && term == r.Term; i-- {
 		count := 1 // itself matched.
 		for _, p := range r.Prs {
 			if p.Match >= i {
