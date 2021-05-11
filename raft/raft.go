@@ -194,16 +194,24 @@ func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	next := r.Prs[to].Next
 	ents, err := r.RaftLog.getEntries(next, r.RaftLog.LastIndex())
-	if len(ents) == 0 || err != nil {
+	if err != nil {
 		return false
 	}
-	entries := make([]*pb.Entry, 0, len(ents))
-	for _, e := range ents {
-		ent := e
-		entries = append(entries, &ent)
+	var pre_idx, pre_term uint64
+	var entries []*pb.Entry
+	if len(ents) > 0 {
+		entries = make([]*pb.Entry, 0, len(ents))
+		for _, e := range ents {
+			ent := e
+			entries = append(entries, &ent)
+		}
+		pre_idx = entries[0].Index - 1
+		pre_term, _ = r.RaftLog.Term(pre_idx)
+	} else {
+		pre_idx = r.Prs[to].Next - 1
+		pre_term, _ = r.RaftLog.Term(pre_idx)
 	}
-	pre_idx := entries[0].Index - 1
-	pre_term, _ := r.RaftLog.Term(pre_idx)
+
 	r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgAppend, To: to, From: r.id, Term: r.Term, LogTerm: pre_term, Index: pre_idx, Entries: entries, Commit: r.RaftLog.committed})
 	return true
 }
@@ -336,6 +344,8 @@ func (r *Raft) Step(m pb.Message) error {
 			ents = append(ents, *e)
 		}
 		r.RaftLog.Append(ents)
+		r.Prs[r.id].Match = r.RaftLog.LastIndex()
+		r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 		for to := range r.Prs {
 			if to != r.id {
 				r.sendAppend(to)
@@ -366,11 +376,16 @@ func (r *Raft) Step(m pb.Message) error {
 				if m.Commit > r.RaftLog.committed {
 					r.RaftLog.committed = min(m.Commit, entries[len(entries)-1].Index)
 				}
+			} else {
+				if m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
+					r.RaftLog.committed = m.Commit
+				}
 			}
 		}
 		if m.Term == r.Term {
 			r.electionElapsed = 0
 		}
+		rep.Commit = r.RaftLog.committed
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgAppendResponse:
 		if m.Term > r.Term {
@@ -384,7 +399,9 @@ func (r *Raft) Step(m pb.Message) error {
 				r.Prs[m.From].Next = m.Index + 1
 				r.maybeCommit()
 			}
-			r.sendAppend(m.From)
+			if r.RaftLog.committed > m.Commit {
+				r.sendAppend(m.From)
+			}
 		}
 	case pb.MessageType_MsgRequestVote:
 		if m.Term > r.Term {
@@ -412,6 +429,14 @@ func (r *Raft) Step(m pb.Message) error {
 		if r.State == StateCandidate && m.Term == r.Term && !m.Reject {
 			r.votes[m.From] = true
 			r.poll()
+			if r.State == StateLeader {
+				for to := range r.Prs {
+					if to != r.id {
+						r.sendAppend(to)
+					}
+				}
+				r.maybeCommit()
+			}
 		}
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
@@ -454,17 +479,18 @@ func (r *Raft) Step(m pb.Message) error {
 
 func (r *Raft) maybeCommit() {
 	majority := len(r.Prs)/2 + 1
-	i := r.RaftLog.LastIndex()
-	for term, err := r.RaftLog.Term(i); i > r.RaftLog.committed && err == nil && term == r.Term; i-- {
-		count := 1 // itself matched.
-		for _, p := range r.Prs {
-			if p.Match >= i {
-				count++
+	for i := r.RaftLog.LastIndex(); i > r.RaftLog.committed; i-- {
+		if term, err := r.RaftLog.Term(i); err == nil && term == r.Term {
+			count := 0
+			for _, p := range r.Prs {
+				if p.Match >= i {
+					count++
+				}
 			}
-		}
-		if count >= majority {
-			r.RaftLog.committed = i
-			return
+			if count >= majority {
+				r.RaftLog.committed = i
+				return
+			}
 		}
 	}
 }
