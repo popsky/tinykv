@@ -183,7 +183,7 @@ func newRaft(c *Config) *Raft {
 		r.Prs[id] = &Progress{}
 		r.votes[id] = false
 	}
-	r.becomeFollower(0, 0)
+	r.becomeFollower(r.Term, None)
 	// Your Code Here (2A).
 	return &r
 }
@@ -255,7 +255,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.electionElapsed = 0
 	r.electionInterval = r.electionTimeout + rand.Intn(r.electionTimeout)
 	if r.Term < term { // A leader with same term cancel the election, don't update Vote for.
-		r.Vote = 0
+		r.Vote = None
 	}
 	r.Term = term
 	r.Lead = lead
@@ -303,9 +303,9 @@ func (r *Raft) becomeLeader() {
 		prs.Match = 0
 		prs.Next = r.RaftLog.LastIndex() + 1
 	}
-	r.RaftLog.Append([]pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}})
+	// r.RaftLog.Append([]pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}})
 
-	// r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}})
+	r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -399,7 +399,7 @@ func (r *Raft) Step(m pb.Message) error {
 				r.Prs[m.From].Next = m.Index + 1
 				r.maybeCommit()
 			}
-			if r.RaftLog.committed > m.Commit {
+			if r.RaftLog.committed > m.Commit || m.Reject {
 				r.sendAppend(m.From)
 			}
 		}
@@ -409,7 +409,7 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 		idx := r.RaftLog.LastIndex()
 		term, _ := r.RaftLog.Term(idx)
-		ok := r.Term <= m.Term && (r.Vote == 0 || r.Vote == m.From) && (m.LogTerm > term || (term == m.LogTerm && idx <= m.Index))
+		ok := r.Term <= m.Term && (r.Vote == None || r.Vote == m.From) && (m.LogTerm > term || (term == m.LogTerm && idx <= m.Index))
 		rep := pb.Message{
 			MsgType: pb.MessageType_MsgRequestVoteResponse,
 			To:      m.From,
@@ -429,14 +429,6 @@ func (r *Raft) Step(m pb.Message) error {
 		if r.State == StateCandidate && m.Term == r.Term && !m.Reject {
 			r.votes[m.From] = true
 			r.poll()
-			if r.State == StateLeader {
-				for to := range r.Prs {
-					if to != r.id {
-						r.sendAppend(to)
-					}
-				}
-				r.maybeCommit()
-			}
 		}
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
@@ -477,7 +469,7 @@ func (r *Raft) Step(m pb.Message) error {
 	return nil
 }
 
-func (r *Raft) maybeCommit() {
+func (r *Raft) maybeCommit() bool {
 	majority := len(r.Prs)/2 + 1
 	for i := r.RaftLog.LastIndex(); i > r.RaftLog.committed; i-- {
 		if term, err := r.RaftLog.Term(i); err == nil && term == r.Term {
@@ -489,10 +481,11 @@ func (r *Raft) maybeCommit() {
 			}
 			if count >= majority {
 				r.RaftLog.committed = i
-				return
+				return true
 			}
 		}
 	}
+	return false
 }
 
 // handleAppendEntries handle AppendEntries RPC request
