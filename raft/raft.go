@@ -397,9 +397,15 @@ func (r *Raft) Step(m pb.Message) error {
 			} else if m.Index > 0 {
 				r.Prs[m.From].Match = m.Index
 				r.Prs[m.From].Next = m.Index + 1
-				r.maybeCommit()
 			}
-			if r.RaftLog.committed > m.Commit || m.Reject {
+			if r.maybeCommit() {
+				r.sendAppend(m.From)
+				for to := range r.Prs {
+					if to != r.id && to != m.From {
+						r.sendAppend(to)
+					}
+				}
+			} else if r.RaftLog.committed > m.Commit || m.Reject {
 				r.sendAppend(m.From)
 			}
 		}
