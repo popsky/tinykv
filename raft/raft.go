@@ -364,28 +364,30 @@ func (r *Raft) Step(m pb.Message) error {
 			Term:    r.Term,
 			Reject:  r.Term > m.Term || err != nil || term != m.LogTerm,
 		}
-		if !rep.Reject {
-			if len(m.Entries) > 0 {
-				entries := make([]pb.Entry, 0, len(m.Entries))
-				for _, e := range m.Entries {
-					ee := e
-					entries = append(entries, *ee)
-				}
-				r.RaftLog.Append(entries)
-				rep.Index = entries[len(entries)-1].Index
-				if m.Commit > r.RaftLog.committed {
-					r.RaftLog.committed = min(m.Commit, entries[len(entries)-1].Index)
-				}
-			} else {
-				if m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
-					r.RaftLog.committed = m.Commit
-				}
-			}
-		}
 		if m.Term == r.Term {
 			r.electionElapsed = 0
+			if !rep.Reject {
+				if len(m.Entries) > 0 {
+					entries := make([]pb.Entry, 0, len(m.Entries))
+					for _, e := range m.Entries {
+						ee := e
+						entries = append(entries, *ee)
+					}
+					r.RaftLog.Append(entries)
+					rep.Index = entries[len(entries)-1].Index
+					if m.Commit > r.RaftLog.committed {
+						r.RaftLog.committed = min(m.Commit, entries[len(entries)-1].Index)
+					}
+				} else {
+					if m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
+						r.RaftLog.committed = m.Commit
+					}
+				}
+			} else if err != nil {
+
+			}
+			rep.Commit = r.RaftLog.committed
 		}
-		rep.Commit = r.RaftLog.committed
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgAppendResponse:
 		if m.Term > r.Term {
@@ -399,9 +401,8 @@ func (r *Raft) Step(m pb.Message) error {
 				r.Prs[m.From].Next = m.Index + 1
 			}
 			if r.maybeCommit() {
-				r.sendAppend(m.From)
 				for to := range r.Prs {
-					if to != r.id && to != m.From {
+					if to != r.id && r.Prs[to].Match >= r.RaftLog.committed {
 						r.sendAppend(to)
 					}
 				}
@@ -441,17 +442,19 @@ func (r *Raft) Step(m pb.Message) error {
 		if m.Term > r.Term || (r.State == StateCandidate && m.Term == r.Term) {
 			r.becomeFollower(m.Term, m.From)
 		}
+		term, err := r.RaftLog.Term(m.Index)
 		rep := pb.Message{
 			MsgType: pb.MessageType_MsgHeartbeatResponse,
 			To:      m.From,
 			From:    r.id,
 			Term:    r.Term,
 			Commit:  r.RaftLog.committed,
+			Reject:  err != nil || term != m.LogTerm || r.Term > m.Term,
 		}
 		if m.Term == r.Term {
 			r.electionElapsed = 0
 		}
-		term, err := r.RaftLog.Term(m.Index)
+
 		if err != nil && term == m.Term && m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
 			r.RaftLog.committed = m.Commit
 		}
