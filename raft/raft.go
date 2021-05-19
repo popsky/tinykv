@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"log"
 	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -364,27 +365,29 @@ func (r *Raft) Step(m pb.Message) error {
 			Term:    r.Term,
 			Reject:  r.Term > m.Term || err != nil || term != m.LogTerm,
 		}
-		if m.Term == r.Term {
+		if m.Term == r.Term { // from current leader.
 			r.electionElapsed = 0
 			if !rep.Reject {
-				if len(m.Entries) > 0 {
-					entries := make([]pb.Entry, 0, len(m.Entries))
-					for _, e := range m.Entries {
-						ee := e
-						entries = append(entries, *ee)
-					}
-					r.RaftLog.Append(entries)
-					rep.Index = entries[len(entries)-1].Index
-					if m.Commit > r.RaftLog.committed {
-						r.RaftLog.committed = min(m.Commit, entries[len(entries)-1].Index)
-					}
-				} else {
-					if m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
-						r.RaftLog.committed = m.Commit
-					}
+				entries := make([]pb.Entry, 0, len(m.Entries))
+				for _, e := range m.Entries {
+					ee := e
+					entries = append(entries, *ee)
 				}
-			} else if err != nil {
-
+				r.RaftLog.Append(entries)
+				rep.Index = m.Index + uint64(len(entries))
+				if m.Commit > r.RaftLog.committed {
+					r.RaftLog.committed = min(m.Commit, rep.Index)
+				}
+			} else if err != nil { // follower's log short than m.Index
+				rep.Index = r.RaftLog.LastIndex() + 1
+				rep.LogTerm = 0
+			} else if m.LogTerm != term { // follower's log contain conflict log entry.
+				l, _, err := r.RaftLog.findTerm(term)
+				if err != nil {
+					log.Fatal(err)
+				}
+				rep.LogTerm = term
+				rep.Index = l
 			}
 			rep.Commit = r.RaftLog.committed
 		}
@@ -395,7 +398,12 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 		if r.State == StateLeader && m.Term == r.Term { // ensure message come from current term
 			if m.Reject {
-				r.Prs[m.From].Next -= 1 // TODO: this may optimize later.
+				_, i, err := r.RaftLog.findTerm(m.LogTerm)
+				if err == ErrUnavailable || m.LogTerm == 0 {
+					r.Prs[m.From].Next = m.Index
+				} else {
+					r.Prs[m.From].Next = i
+				}
 			} else if m.Index > 0 {
 				r.Prs[m.From].Match = m.Index
 				r.Prs[m.From].Next = m.Index + 1
@@ -448,23 +456,46 @@ func (r *Raft) Step(m pb.Message) error {
 			To:      m.From,
 			From:    r.id,
 			Term:    r.Term,
-			Commit:  r.RaftLog.committed,
 			Reject:  err != nil || term != m.LogTerm || r.Term > m.Term,
 		}
-		if m.Term == r.Term {
+		if m.Term == r.Term { // current leader.
 			r.electionElapsed = 0
+			if !rep.Reject {
+				if m.Commit > r.RaftLog.committed {
+					r.RaftLog.committed = min(m.Commit, m.Index)
+				}
+			} else if err != nil { // follower's log short than m.Index
+				rep.Index = r.RaftLog.LastIndex() + 1
+				rep.Term = 0
+			} else if m.LogTerm != term { // follower's log contain conflict log entry.
+				l, _, err := r.RaftLog.findTerm(term)
+				if err != nil {
+					log.Fatal(err)
+				}
+				rep.LogTerm = term
+				rep.Index = l
+			}
 		}
-
-		if err != nil && term == m.Term && m.Commit > r.RaftLog.committed && m.Commit <= m.Index {
-			r.RaftLog.committed = m.Commit
-		}
+		rep.Commit = r.RaftLog.committed
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgHeartbeatResponse:
 		if m.Term > r.Term {
 			r.becomeFollower(m.Term, m.From)
 		}
-		if r.State == StateLeader && m.Commit < r.RaftLog.committed {
-			r.sendHeartbeat(m.From)
+		if r.State == StateLeader {
+			if m.Reject {
+				_, i, err := r.RaftLog.findTerm(m.LogTerm)
+				if err == ErrUnavailable || m.LogTerm == 0 {
+					r.Prs[m.From].Next = m.Index
+				} else {
+					r.Prs[m.From].Next = i
+				}
+				r.sendAppend(m.From)
+			} else if m.Index < r.RaftLog.LastIndex() {
+				r.sendAppend(m.From)
+			} else if m.Commit < r.RaftLog.committed {
+				r.sendHeartbeat(m.From)
+			}
 		}
 	case pb.MessageType_MsgTransferLeader:
 	case pb.MessageType_MsgTimeoutNow:

@@ -59,9 +59,9 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	hs, _, _ := storage.InitialState()
+	// hs, _, _ := storage.InitialState()
 	stabled, _ := storage.LastIndex() //0
-	snapshot, _ := storage.Snapshot()
+	// snapshot, _ := storage.Snapshot()
 	first_idx, _ := storage.FirstIndex() // 1
 	var entries []pb.Entry = nil
 	if first_idx < stabled+1 {
@@ -69,8 +69,8 @@ func newLog(storage Storage) *RaftLog {
 	}
 	l := &RaftLog{
 		storage:   storage,
-		committed: hs.Commit,
-		applied:   snapshot.Metadata.Index,
+		committed: 0,
+		applied:   0,
 		stabled:   stabled,
 		entries:   entries,
 	}
@@ -156,4 +156,33 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 0, ErrUnavailable
 	}
 	return l.entries[l.offset(i)].Term, nil
+}
+
+// findTern return the range [left,right) such that all log entry's index in that range will have the given term, return ErrUnavailable if no entry has the given term.
+func (l *RaftLog) findTerm(term uint64) (uint64, uint64, error) {
+	i, err := l.storage.FirstIndex()
+	if err != nil {
+		log.Panicf("%v", err)
+	}
+	i = i - 1
+	for ; i <= l.LastIndex(); i++ {
+		t, err := l.Term(i)
+		if err != nil {
+			log.Panicf("%v", err)
+		}
+		if t == term {
+			j := i + 1
+			for ; j <= l.LastIndex(); j++ {
+				t, err := l.Term(j)
+				if err != nil {
+					log.Panic(err)
+				}
+				if t != term {
+					break
+				}
+			}
+			return i, j, nil
+		}
+	}
+	return 0, 0, ErrUnavailable
 }
