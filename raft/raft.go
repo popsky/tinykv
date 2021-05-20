@@ -304,7 +304,6 @@ func (r *Raft) becomeLeader() {
 		prs.Match = 0
 		prs.Next = r.RaftLog.LastIndex() + 1
 	}
-	// r.RaftLog.Append([]pb.Entry{{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}})
 
 	r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: nil}}})
 }
@@ -333,68 +332,30 @@ func (r *Raft) Step(m pb.Message) error {
 			}
 		}
 	case pb.MessageType_MsgPropose:
-		if r.State != StateLeader {
-			panic("expect being leader")
-		}
-		idx := r.RaftLog.LastIndex() + 1
-		var ents []pb.Entry = make([]pb.Entry, 0, len(m.Entries))
-		for _, e := range m.Entries {
-			e.Term = r.Term
-			e.Index = idx
-			idx += 1
-			ents = append(ents, *e)
-		}
-		r.RaftLog.Append(ents)
-		r.Prs[r.id].Match = r.RaftLog.LastIndex()
-		r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
-		for to := range r.Prs {
-			if to != r.id {
-				r.sendAppend(to)
+		if r.State == StateLeader {
+			idx := r.RaftLog.LastIndex() + 1
+			var ents []pb.Entry = make([]pb.Entry, 0, len(m.Entries))
+			for _, e := range m.Entries {
+				e.Term = r.Term
+				e.Index = idx
+				idx += 1
+				ents = append(ents, *e)
 			}
+			r.RaftLog.Append(ents)
+			r.Prs[r.id].Match = r.RaftLog.LastIndex()
+			r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
+			for to := range r.Prs {
+				if to != r.id {
+					r.sendAppend(to)
+				}
+			}
+			r.maybeCommit()
 		}
-		r.maybeCommit()
 	case pb.MessageType_MsgAppend:
-		if m.Term > r.Term || (r.State == StateCandidate && m.Term == r.Term) {
-			r.becomeFollower(m.Term, m.From)
-		}
-		term, err := r.RaftLog.Term(m.Index)
-		rep := pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			To:      m.From,
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  r.Term > m.Term || err != nil || term != m.LogTerm,
-		}
-		if m.Term == r.Term { // from current leader.
-			r.electionElapsed = 0
-			if !rep.Reject {
-				entries := make([]pb.Entry, 0, len(m.Entries))
-				for _, e := range m.Entries {
-					ee := e
-					entries = append(entries, *ee)
-				}
-				r.RaftLog.Append(entries)
-				rep.Index = m.Index + uint64(len(entries))
-				if m.Commit > r.RaftLog.committed {
-					r.RaftLog.committed = min(m.Commit, rep.Index)
-				}
-			} else if err != nil { // follower's log short than m.Index
-				rep.Index = r.RaftLog.LastIndex() + 1
-				rep.LogTerm = 0
-			} else if m.LogTerm != term { // follower's log contain conflict log entry.
-				l, _, err := r.RaftLog.findTerm(term)
-				if err != nil {
-					log.Fatal(err)
-				}
-				rep.LogTerm = term
-				rep.Index = l
-			}
-			rep.Commit = r.RaftLog.committed
-		}
-		r.msgs = append(r.msgs, rep)
+		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
 		if m.Term > r.Term {
-			r.becomeFollower(m.Term, m.From)
+			r.becomeFollower(m.Term, None)
 		}
 		if r.State == StateLeader && m.Term == r.Term { // ensure message come from current term
 			if m.Reject {
@@ -420,7 +381,7 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 	case pb.MessageType_MsgRequestVote:
 		if m.Term > r.Term {
-			r.becomeFollower(m.Term, m.From)
+			r.becomeFollower(m.Term, None)
 		}
 		idx := r.RaftLog.LastIndex()
 		term, _ := r.RaftLog.Term(idx)
@@ -439,7 +400,7 @@ func (r *Raft) Step(m pb.Message) error {
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgRequestVoteResponse:
 		if m.Term > r.Term {
-			r.becomeFollower(m.Term, m.From)
+			r.becomeFollower(m.Term, None)
 		}
 		if r.State == StateCandidate && m.Term == r.Term && !m.Reject {
 			r.votes[m.From] = true
@@ -480,7 +441,7 @@ func (r *Raft) Step(m pb.Message) error {
 		r.msgs = append(r.msgs, rep)
 	case pb.MessageType_MsgHeartbeatResponse:
 		if m.Term > r.Term {
-			r.becomeFollower(m.Term, m.From)
+			r.becomeFollower(m.Term, None)
 		}
 		if r.State == StateLeader {
 			if m.Reject {
@@ -531,12 +492,42 @@ func (r *Raft) maybeCommit() bool {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	if m.Term >= r.Term {
+		r.becomeFollower(m.Term, m.From)
+	}
+	term, err := r.RaftLog.Term(m.Index)
 	rep := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		To:      m.From,
 		From:    r.id,
 		Term:    r.Term,
-		Reject:  r.Term > m.Term || !r.logMatch(m),
+		Reject:  r.Term > m.Term || err != nil || term != m.LogTerm,
+	}
+	if m.Term == r.Term { // from current leader.
+		r.electionElapsed = 0
+		if !rep.Reject {
+			entries := make([]pb.Entry, 0, len(m.Entries))
+			for _, e := range m.Entries {
+				ee := e
+				entries = append(entries, *ee)
+			}
+			r.RaftLog.Append(entries)
+			rep.Index = m.Index + uint64(len(entries))
+			if m.Commit > r.RaftLog.committed {
+				r.RaftLog.committed = min(m.Commit, rep.Index)
+			}
+		} else if err != nil { // follower's log short than m.Index
+			rep.Index = r.RaftLog.LastIndex() + 1
+			rep.LogTerm = 0
+		} else if m.LogTerm != term { // follower's log contain conflict log entry.
+			l, _, err := r.RaftLog.findTerm(term)
+			if err != nil {
+				log.Fatal(err)
+			}
+			rep.LogTerm = term
+			rep.Index = l
+		}
+		rep.Commit = r.RaftLog.committed
 	}
 	r.msgs = append(r.msgs, rep)
 }
