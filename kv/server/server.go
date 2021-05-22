@@ -56,7 +56,7 @@ func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kv
 		req.Value,
 		req.Cf,
 	}
-	err := server.storage.Write(req.GetContext(), []storage.Modify{storage.Modify{p}})
+	err := server.storage.Write(req.GetContext(), []storage.Modify{{p}})
 	res := new(kvrpcpb.RawPutResponse)
 	return res, err
 }

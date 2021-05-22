@@ -59,7 +59,7 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	// hs, _, _ := storage.InitialState()
+	hs, _, _ := storage.InitialState()
 	stabled, _ := storage.LastIndex() //0
 	// snapshot, _ := storage.Snapshot()
 	first_idx, _ := storage.FirstIndex() // 1
@@ -69,7 +69,7 @@ func newLog(storage Storage) *RaftLog {
 	}
 	l := &RaftLog{
 		storage:   storage,
-		committed: 0,
+		committed: hs.Commit,
 		applied:   0,
 		stabled:   stabled,
 		entries:   entries,
