@@ -3,6 +3,7 @@ package raftstore
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger"
@@ -308,6 +309,7 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	
 	return nil
 }
 
@@ -335,12 +337,19 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	raftWB := new(engine_util.WriteBatch)
 	err := ps.Append(ready.Entries, raftWB)
 	if err != nil {
-		log.Panic(err)
+		return nil, err
 	}
-	hardState := ready.HardState
-	ps.raftState.HardState = &hardState
-	ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
-	return nil, nil
+	if !reflect.DeepEqual(eraftpb.HardState{}, ready.HardState) {
+		preRaftState := ps.raftState
+		ps.raftState = &rspb.RaftLocalState{
+			HardState: &ready.HardState,
+			LastIndex: preRaftState.LastIndex,
+			LastTerm:  preRaftState.LastTerm,
+		}
+		raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	}
+
+	return ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 }
 
 func (ps *PeerStorage) ClearData() {
