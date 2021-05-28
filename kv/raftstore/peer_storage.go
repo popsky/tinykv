@@ -3,7 +3,6 @@ package raftstore
 import (
 	"bytes"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger"
@@ -309,7 +308,40 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	
+	if len(entries) == 0 {
+		return nil
+	}
+
+	first, _ := ps.FirstIndex()
+	last := entries[0].Index + uint64(len(entries)) - 1
+
+	// shortcut if there is no new entry.
+	if last < first {
+		return nil
+	}
+	// truncate compacted entries
+	if first > entries[0].Index {
+		entries = entries[first-entries[0].Index:]
+	}
+	offset := entries[0].Index - ps.truncatedIndex()
+
+	last_index, _ := ps.LastIndex()
+	log_len := last_index - ps.truncatedIndex()
+	if offset > log_len {
+		log.Panicf("missing log entry [last: %d, append at: %d]", last_index, entries[0].Index)
+	}
+	// delete conflic entry.
+	if log_len > offset {
+		for i := offset; i <= last_index; i++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
+		}
+	}
+	for _, e := range entries {
+		e := e
+		raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, e.Index), &e)
+	}
+	ps.raftState.LastIndex = entries[len(entries)-1].Index
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 
@@ -339,17 +371,17 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	if err != nil {
 		return nil, err
 	}
-	if !reflect.DeepEqual(eraftpb.HardState{}, ready.HardState) {
-		preRaftState := ps.raftState
-		ps.raftState = &rspb.RaftLocalState{
-			HardState: &ready.HardState,
-			LastIndex: preRaftState.LastIndex,
-			LastTerm:  preRaftState.LastTerm,
-		}
-		raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
 	}
-
-	return ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	// asr, err := ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	kvWB.MustWriteToDB(ps.Engines.Kv)
+	raftWB.MustWriteToDB(ps.Engines.Raft)
+	return nil, err
 }
 
 func (ps *PeerStorage) ClearData() {
