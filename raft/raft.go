@@ -16,8 +16,9 @@ package raft
 
 import (
 	"errors"
-	"log"
 	"math/rand"
+
+	"github.com/pingcap-incubator/tinykv/log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -167,7 +168,7 @@ func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
-	hs, _, _ := c.Storage.InitialState()
+	hs, sf, _ := c.Storage.InitialState()
 
 	r := Raft{
 		id:               c.ID,
@@ -180,11 +181,22 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
 	}
-	for _, id := range c.peers {
+	r.RaftLog.applied = c.Applied
+	var peers []uint64
+	if len(c.peers) > 0 {
+		peers = c.peers
+	} else {
+		peers = sf.Nodes
+	}
+	if len(peers) == 0 {
+		log.Panicf("starting raft:%v with empty peers", c.ID)
+	}
+	for _, id := range peers {
 		r.Prs[id] = &Progress{}
 		r.votes[id] = false
 	}
 	r.becomeFollower(r.Term, None)
+	log.Infof("create raft id: %v with config: %+v, hard state: %+v, soft state: %+v", r.id, c, hs, sf)
 	// Your Code Here (2A).
 	return &r
 }
@@ -236,6 +248,7 @@ func (r *Raft) sendRequestVote(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	log.Infof("tick on raft %d, state %v", r.id, r.State)
 	if r.State == StateLeader {
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
@@ -296,6 +309,8 @@ func (r *Raft) poll() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	log.Infof("%d become leader at term %v",
+		r.id, r.Term)
 	if r.State != StateCandidate {
 		panic("invalid transfer to leader")
 	}
