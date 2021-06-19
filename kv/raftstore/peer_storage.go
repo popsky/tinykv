@@ -323,7 +323,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	if first > entries[0].Index {
 		entries = entries[first-entries[0].Index:]
 	}
-	offset := entries[0].Index - ps.truncatedIndex()
+	offset := entries[0].Index - first
 
 	last_index, _ := ps.LastIndex()
 	log_len := last_index - ps.truncatedIndex()
@@ -332,7 +332,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	}
 	// delete conflic entry.
 	if log_len > offset {
-		for i := offset; i <= last_index; i++ {
+		for i := offset; i < log_len; i++ {
 			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
 		}
 	}

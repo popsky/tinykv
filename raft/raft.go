@@ -196,7 +196,7 @@ func newRaft(c *Config) *Raft {
 		r.votes[id] = false
 	}
 	r.becomeFollower(r.Term, None)
-	log.Infof("create raft id: %v with config: %+v, hard state: %+v, soft state: %+v", r.id, c, hs, sf)
+	log.Debugf("create raft id: %v with config: %+v, hard state: %+v, soft state: %+v", r.id, c, hs, sf)
 	// Your Code Here (2A).
 	return &r
 }
@@ -248,7 +248,6 @@ func (r *Raft) sendRequestVote(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
-	log.Infof("tick on raft %d, state %v", r.id, r.State)
 	if r.State == StateLeader {
 		r.heartbeatElapsed++
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
